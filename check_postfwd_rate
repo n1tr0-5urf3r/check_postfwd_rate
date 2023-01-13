@@ -1,0 +1,105 @@
+#!/bin/bash
+#################################################################
+# Written by Fabian Ihle, fabi@ihlecloud.de                     #
+# Created: 23.02.2021                                           #
+# github: https://github.com/n1tr0-5urf3r/icinga2-scripts       #
+#                                                               #
+# This plugin checks if any sender has exceeded a rate limit    #
+# ------------------------------------------------------------- #
+# Changelog:                                                    #
+# 230221 Version 1.0 - Initial release                          #
+# 161222 Version 1.1 - Dumpfile and dynamic limits              #
+#                                                               #
+#                                                               #
+#                                                               #
+#  INSTALLATION                                                 #
+#  To avoid permission issues when running this check via nrpe  #
+#  configure a cronjob like following to periodically cache     #
+#  data                                                         #
+# */3 * * * * /usr/sbin/postfwd --dumpcache > /var/opt/postfwd_dumpcache.txt
+#                                                               #
+#                                                               # 
+#################################################################
+
+
+
+POSTFWDBIN=$(command -v postfwd)
+DUMPFILE=/var/opt/postfwd_dumpcache.txt
+
+print_help() {
+        echo "
+                Usage:
+                        ./check_postfwd_rate    -h Display this message
+                "
+}
+
+print_error() {
+        echo -e "Error: $1\\n"
+        exit 3
+}
+
+
+while test -n "$1"; do
+        case "$1" in
+                -h)
+                        print_help
+                        exit 3
+                        ;;
+                *)
+                        print_help
+                        print_error "Unknown argument: $1"
+                        ;;
+        esac
+        shift
+done
+
+if [ -z "$POSTFWDBIN" ]; then
+        print_error "postfwd binary not found"
+fi
+
+#RESULTALL=$(sudo -u nagios sudo ${POSTFWDBIN} --dumpcache)
+RESULTALL=$(cat "$DUMPFILE")
+
+if [[ "${RESULTALL}" == *"<undef>"* ]]; then
+        print_error "postfwd cache is empty. This might take some time."
+fi
+
+if [ -z "${RESULTALL}" ]; then
+        print_error "postfwd cache is not accessible!"
+fi
+
+OUTPUT=""
+
+# Get all configured limits and transform them into an array
+LIMIT=$(echo "$RESULTALL" | grep -o "@list.*" | sort -u | grep -oE "[0-9]{1,}_[0-9]{1,}" | sed 's/_.*//g')
+LIMIT=($LIMIT)
+
+for l in "${LIMIT[@]}"
+do
+        # Get all entries that have a send count equal to the current limit
+        RESULT=$(echo "$RESULTALL" | grep "@count    -> '${l}'")
+        # Extract the sender's name from it
+        NAME=$(echo "${RESULT}" | grep -oP "sasl_username=.*? "| sed 's/sasl_username=//g')
+        for n in ${NAME};
+        do
+                # MAXCOUNTER set for this sender, verify if he reached the limit
+                MAX=$(echo "${RESULTALL}" | grep -Eo "${n} -> (.)+ -> @maxcount -> '[0-9]+" | sed "s/.*'//")
+
+                if [ -z "${MAX}" ]; then
+                        print_error "Retrieving limit verification failed. Please contact the author."
+                fi
+
+                if [ "${MAX}" -eq "${l}" ]; then
+                        OUTPUT="${OUTPUT}\n${n} exceeded the sending limit of ${l}!\\n"
+                fi
+        done
+done
+
+if [ -z "${OUTPUT}" ]; then
+        echo "All good! No rate limits exceeded."
+        exit 0
+else
+        echo "CRITICAL: Rate limits exceeded:"
+        echo -e "${OUTPUT}"
+        exit 2
+fi
